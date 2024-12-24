@@ -32,6 +32,8 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -215,23 +217,22 @@ public abstract class RateLimiter {
    */
   private final SleepingStopwatch stopwatch;
 
-  // Can't be initialized in the constructor because mocks don't call the constructor.
-  private volatile @Nullable Object mutexDoNotUseDirectly;
+  private volatile ReentrantLock lockObject;
 
-  private Object mutex() {
-    Object mutex = mutexDoNotUseDirectly;
-    if (mutex == null) {
+  private final ReentrantLock getLockObject() {
+    if (lockObject == null) {
       synchronized (this) {
-        mutex = mutexDoNotUseDirectly;
-        if (mutex == null) {
-          mutexDoNotUseDirectly = mutex = new Object();
+        if (lockObject == null) {
+          lockObject = new ReentrantLock();
+          return lockObject;
         }
       }
     }
-    return mutex;
+    return lockObject;
   }
 
   RateLimiter(SleepingStopwatch stopwatch) {
+    this.lockObject = new ReentrantLock();
     this.stopwatch = checkNotNull(stopwatch);
   }
 
@@ -255,8 +256,11 @@ public abstract class RateLimiter {
    */
   public final void setRate(double permitsPerSecond) {
     checkArgument(permitsPerSecond > 0.0, "rate must be positive");
-    synchronized (mutex()) {
+    getLockObject().lock();
+    try {
       doSetRate(permitsPerSecond, stopwatch.readMicros());
+    } finally {
+      getLockObject().unlock();
     }
   }
 
@@ -269,8 +273,11 @@ public abstract class RateLimiter {
    * after invocations to {@linkplain #setRate}.
    */
   public final double getRate() {
-    synchronized (mutex()) {
+    getLockObject().lock();
+    try {
       return doGetRate();
+    } finally {
+      getLockObject().unlock();
     }
   }
 
@@ -314,8 +321,11 @@ public abstract class RateLimiter {
    */
   final long reserve(int permits) {
     checkPermits(permits);
-    synchronized (mutex()) {
+    getLockObject().lock();
+    try {
       return reserveAndGetWaitLength(permits, stopwatch.readMicros());
+    } finally {
+      getLockObject().unlock();
     }
   }
 
@@ -410,13 +420,16 @@ public abstract class RateLimiter {
     long timeoutMicros = max(unit.toMicros(timeout), 0);
     checkPermits(permits);
     long microsToWait;
-    synchronized (mutex()) {
+    getLockObject().lock();
+    try {
       long nowMicros = stopwatch.readMicros();
       if (!canAcquire(nowMicros, timeoutMicros)) {
         return false;
       } else {
         microsToWait = reserveAndGetWaitLength(permits, nowMicros);
       }
+    } finally {
+      getLockObject().unlock();
     }
     stopwatch.sleepMicrosUninterruptibly(microsToWait);
     return true;
